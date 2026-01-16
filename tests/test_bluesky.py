@@ -47,11 +47,13 @@ class TestBlueskyPublisher:
         mock_blob_response = MagicMock()
         mock_blob_response.blob = MagicMock()
 
-        with patch.object(publisher, "_client", new_callable=MagicMock) as mock_client:
-            mock_client.login = AsyncMock()
+        with patch.object(publisher, "_ensure_authenticated", new_callable=AsyncMock) as mock_auth, \
+             patch("falcon_messenger.publishers.bluesky.ImagesEmbed") as mock_embed, \
+             patch("falcon_messenger.publishers.bluesky.Image") as mock_image:
+            mock_client = MagicMock()
             mock_client.upload_blob = AsyncMock(return_value=mock_blob_response)
             mock_client.send_post = AsyncMock(return_value=mock_response)
-            publisher._authenticated = True
+            mock_auth.return_value = mock_client
 
             image_data = b"fake image data"
             result = await publisher.publish("Post with image", image_data, "image/png")
@@ -59,6 +61,8 @@ class TestBlueskyPublisher:
             assert result.success is True
             mock_client.upload_blob.assert_called_once_with(image_data, "image/png")
             mock_client.send_post.assert_called_once()
+            mock_image.assert_called_once()
+            mock_embed.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_publish_failure(self, publisher):
