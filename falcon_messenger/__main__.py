@@ -195,7 +195,7 @@ def recommendations_cmd(
     Examples:
         falcon-messenger recommendations --once --dry-run
         falcon-messenger recommendations --interval 60
-        falcon-messenger recommendations --endpoint https://192.168.1.162/api/recommendations
+        falcon-messenger recommendations --endpoint https://falcon-host/api/recommendations
         falcon-messenger recommendations --min-rvol 2.5
         falcon-messenger recommendations --show-history
         falcon-messenger recommendations --clear-history

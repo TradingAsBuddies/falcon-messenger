@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       # Falcon Recommendations Endpoint
-      - FALCON_ENDPOINT_URL=${FALCON_ENDPOINT_URL:-https://192.168.1.162/api/recommendations}
+      - FALCON_ENDPOINT_URL=${FALCON_ENDPOINT_URL:?FALCON_ENDPOINT_URL is required}
       - FALCON_POLL_INTERVAL=${FALCON_POLL_INTERVAL:-300}
       - FALCON_VERIFY_SSL=${FALCON_VERIFY_SSL:-false}
       # Discord Configuration
