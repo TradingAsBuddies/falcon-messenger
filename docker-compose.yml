@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  falcon-recommendations:
+    build: .
+    container_name: falcon-recommendations
+    restart: unless-stopped
+    environment:
+      # Falcon Recommendations Endpoint
+      - FALCON_ENDPOINT_URL=${FALCON_ENDPOINT_URL:-https://192.168.1.162/api/recommendations}
+      - FALCON_POLL_INTERVAL=${FALCON_POLL_INTERVAL:-300}
+      - FALCON_VERIFY_SSL=${FALCON_VERIFY_SSL:-false}
+      # Discord Configuration
+      - FALCON_DISCORD_WEBHOOK_URL=${FALCON_DISCORD_WEBHOOK_URL}
+      # Optional: Bluesky Configuration
+      - FALCON_BLUESKY_HANDLE=${FALCON_BLUESKY_HANDLE:-}
+      - FALCON_BLUESKY_APP_PASSWORD=${FALCON_BLUESKY_APP_PASSWORD:-}
+      # Server settings (if running API server instead)
+      - FALCON_HOST=0.0.0.0
+      - FALCON_PORT=8080
+      - FALCON_DEBUG=${FALCON_DEBUG:-false}
+    # Use env_file to load from .env if it exists
+    env_file:
+      - .env
+    # Uncomment to run API server instead of recommendations scheduler
+    # command: ["falcon-messenger", "serve"]
+    # ports:
+    #   - "8080:8080"
+
+  # Alternative service for running the API server
+  falcon-api:
+    build: .
+    container_name: falcon-api
+    profiles:
+      - api
+    restart: unless-stopped
+    environment:
+      - FALCON_HOST=0.0.0.0
+      - FALCON_PORT=8080
+      - FALCON_DISCORD_WEBHOOK_URL=${FALCON_DISCORD_WEBHOOK_URL}
+      - FALCON_BLUESKY_HANDLE=${FALCON_BLUESKY_HANDLE:-}
+      - FALCON_BLUESKY_APP_PASSWORD=${FALCON_BLUESKY_APP_PASSWORD:-}
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    command: ["falcon-messenger", "serve"]

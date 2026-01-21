@@ -34,6 +34,20 @@ class DiscordConfig:
 
 
 @dataclass
+class FalconEndpointConfig:
+    """Falcon recommendations endpoint configuration."""
+
+    endpoint_url: Optional[str] = None
+    poll_interval: int = 300  # seconds (default 5 minutes)
+    verify_ssl: bool = False  # Support self-signed certificates
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Falcon endpoint is configured."""
+        return bool(self.endpoint_url)
+
+
+@dataclass
 class Settings:
     """Application settings loaded from environment variables."""
 
@@ -42,6 +56,7 @@ class Settings:
     debug: bool = False
     bluesky: BlueskyConfig = field(default_factory=BlueskyConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    falcon_endpoint: FalconEndpointConfig = field(default_factory=FalconEndpointConfig)
 
     @classmethod
     def from_env(cls, env_file: Optional[Path] = None) -> "Settings":
@@ -67,12 +82,19 @@ class Settings:
             webhook_url=os.getenv("FALCON_DISCORD_WEBHOOK_URL"),
         )
 
+        falcon_endpoint = FalconEndpointConfig(
+            endpoint_url=os.getenv("FALCON_ENDPOINT_URL"),
+            poll_interval=int(os.getenv("FALCON_POLL_INTERVAL", "300")),
+            verify_ssl=os.getenv("FALCON_VERIFY_SSL", "").lower() in ("true", "1", "yes"),
+        )
+
         return cls(
             host=os.getenv("FALCON_HOST", "0.0.0.0"),
             port=int(os.getenv("FALCON_PORT", "8080")),
             debug=os.getenv("FALCON_DEBUG", "").lower() in ("true", "1", "yes"),
             bluesky=bluesky,
             discord=discord,
+            falcon_endpoint=falcon_endpoint,
         )
 
     def get_configured_targets(self) -> list[str]:
@@ -93,4 +115,5 @@ class Settings:
         return {
             "bluesky": self.bluesky.is_configured,
             "discord": self.discord.is_configured,
+            "falcon_endpoint": self.falcon_endpoint.is_configured,
         }
