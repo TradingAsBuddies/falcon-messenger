@@ -173,7 +173,8 @@ def config_cmd(check: bool, env_file: Optional[str]):
 @click.option("--interval", "-i", type=int, help="Poll interval in seconds (overrides config)")
 @click.option("--endpoint", "-e", help="Falcon endpoint URL (overrides config)")
 @click.option("--min-rvol", type=float, default=2.0, help="Minimum RVOL to post (default: 2.0)")
-@click.option("--no-rvol-check", is_flag=True, help="Skip RVOL filtering")
+@click.option("--min-volume", type=int, default=1_000_000, help="Minimum volume to post (default: 1,000,000)")
+@click.option("--no-finviz-check", is_flag=True, help="Skip Finviz RVOL/volume filtering")
 @click.option("--no-tracking", is_flag=True, help="Don't track posted tickers (allow duplicates)")
 @click.option("--clear-history", is_flag=True, help="Clear posted tickers history and exit")
 @click.option("--show-history", is_flag=True, help="Show posted tickers history and exit")
@@ -184,19 +185,22 @@ def recommendations_cmd(
     interval: Optional[int],
     endpoint: Optional[str],
     min_rvol: float,
-    no_rvol_check: bool,
+    min_volume: int,
+    no_finviz_check: bool,
     no_tracking: bool,
     clear_history: bool,
     show_history: bool,
     env_file: Optional[str],
 ):
-    """Fetch recommendations from Falcon and post to Discord as a table.
+    """Fetch recommendations from Falcon and post to Discord.
+
+    Only posts stocks meeting RVOL and volume thresholds from Finviz.
 
     Examples:
         falcon-messenger recommendations --once --dry-run
         falcon-messenger recommendations --interval 60
         falcon-messenger recommendations --endpoint https://falcon-host/api/recommendations
-        falcon-messenger recommendations --min-rvol 2.5
+        falcon-messenger recommendations --min-rvol 2.5 --min-volume 500000
         falcon-messenger recommendations --show-history
         falcon-messenger recommendations --clear-history
     """
@@ -262,20 +266,26 @@ def recommendations_cmd(
                 items = get_recommendations_list(data)
 
                 if dry_run:
-                    # Show all recommendations with RVOL check if enabled
-                    finviz = FinvizChecker() if not no_rvol_check else None
-                    click.echo(f"Found {len(items)} recommendations (min RVOL: {min_rvol}):\n")
+                    # Show all recommendations with Finviz check if enabled
+                    finviz = FinvizChecker() if not no_finviz_check else None
+                    click.echo(f"Found {len(items)} recommendations (min RVOL: {min_rvol}, min Vol: {min_volume:,}):\n")
                     for i, item in enumerate(items, 1):
                         ticker = item.get("ticker", "")
                         rvol = None
+                        volume = None
                         if finviz:
-                            rvol = await finviz.get_rvol(ticker)
-                            would_post = rvol is not None and rvol >= min_rvol
+                            metrics = await finviz.get_metrics(ticker)
+                            if metrics:
+                                rvol = metrics.get("rvol")
+                                volume = metrics.get("volume")
+                            rvol_pass = rvol is not None and rvol >= min_rvol
+                            vol_pass = volume is not None and volume >= min_volume
+                            would_post = rvol_pass and vol_pass
                             status = "PASS" if would_post else "SKIP"
                         else:
                             status = "N/A"
 
-                        message = format_single_recommendation(item, rvol)
+                        message = format_single_recommendation(item, rvol, volume)
                         click.echo(f"--- {i}/{len(items)} [{status}] ---")
                         click.echo(message)
                         click.echo("")
@@ -288,11 +298,12 @@ def recommendations_cmd(
                         settings.discord.webhook_url,
                         settings.falcon_endpoint.poll_interval,
                         min_rvol=min_rvol,
-                        check_rvol=not no_rvol_check,
+                        min_volume=min_volume,
+                        check_finviz=not no_finviz_check,
                         track_posted=not no_tracking,
                     )
                     posted, total = await scheduler.fetch_and_post_once()
-                    click.echo(f"Posted {posted}/{total} recommendations to Discord (RVOL >= {min_rvol})")
+                    click.echo(f"Posted {posted}/{total} recommendations to Discord (RVOL >= {min_rvol}, Vol >= {min_volume:,})")
                     await scheduler.stop()
             else:
                 # Run scheduler
@@ -301,13 +312,15 @@ def recommendations_cmd(
                     settings.discord.webhook_url,
                     settings.falcon_endpoint.poll_interval,
                     min_rvol=min_rvol,
-                    check_rvol=not no_rvol_check,
+                    min_volume=min_volume,
+                    check_finviz=not no_finviz_check,
                     track_posted=not no_tracking,
                 )
                 click.echo(f"Starting recommendations scheduler")
                 click.echo(f"  Interval: {settings.falcon_endpoint.poll_interval}s")
                 click.echo(f"  Min RVOL: {min_rvol}")
-                click.echo(f"  RVOL check: {'enabled' if not no_rvol_check else 'disabled'}")
+                click.echo(f"  Min Volume: {min_volume:,}")
+                click.echo(f"  Finviz check: {'enabled' if not no_finviz_check else 'disabled'}")
                 click.echo(f"  Tracking: {'enabled' if not no_tracking else 'disabled'}")
                 click.echo("Press Ctrl+C to stop")
 

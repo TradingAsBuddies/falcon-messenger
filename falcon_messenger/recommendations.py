@@ -48,6 +48,18 @@ class FinvizChecker:
         Returns:
             RVOL value as float, or None if not found/error.
         """
+        metrics = await self.get_metrics(ticker)
+        return metrics.get("rvol") if metrics else None
+
+    async def get_metrics(self, ticker: str) -> Optional[dict[str, float]]:
+        """Get RVOL and Volume for a ticker from Finviz.
+
+        Args:
+            ticker: Stock ticker symbol.
+
+        Returns:
+            Dict with 'rvol' and 'volume' keys, or None if error.
+        """
         try:
             client = await self._get_client()
             url = f"{self.FINVIZ_URL}?t={ticker}"
@@ -55,22 +67,34 @@ class FinvizChecker:
             response.raise_for_status()
 
             html = response.text
+            metrics = {}
 
             # Look for Rel Volume in the Finviz page
             # Pattern matches: <td ...>Rel Volume</td><td ...><b>1.23</b></td>
-            pattern = r'Rel Volume</td><td[^>]*><b[^>]*>([0-9.]+)</b>'
-            match = re.search(pattern, html)
-
-            if match:
-                rvol = float(match.group(1))
-                logger.debug(f"{ticker} RVOL: {rvol}")
-                return rvol
+            rvol_pattern = r'Rel Volume</td><td[^>]*><b[^>]*>([0-9.]+)</b>'
+            rvol_match = re.search(rvol_pattern, html)
+            if rvol_match:
+                metrics["rvol"] = float(rvol_match.group(1))
             else:
                 logger.warning(f"RVOL not found for {ticker}")
-                return None
+
+            # Look for Volume - format: Volume</td><td ...><b>1,234,567</b>
+            vol_pattern = r'>Volume</td><td[^>]*><b[^>]*>([0-9,]+)</b>'
+            vol_match = re.search(vol_pattern, html)
+            if vol_match:
+                # Remove commas and convert to int
+                vol_str = vol_match.group(1).replace(",", "")
+                metrics["volume"] = int(vol_str)
+            else:
+                logger.warning(f"Volume not found for {ticker}")
+
+            if metrics:
+                logger.debug(f"{ticker} metrics: RVOL={metrics.get('rvol')}, Vol={metrics.get('volume')}")
+                return metrics
+            return None
 
         except Exception as e:
-            logger.error(f"Error fetching RVOL for {ticker}: {e}")
+            logger.error(f"Error fetching metrics for {ticker}: {e}")
             return None
 
     async def close(self) -> None:
@@ -228,12 +252,26 @@ class RecommendationsFetcher:
             self._client = None
 
 
-def format_single_recommendation(item: dict[str, Any], rvol: Optional[float] = None) -> str:
+def format_volume(volume: int) -> str:
+    """Format volume with K/M suffix."""
+    if volume >= 1_000_000:
+        return f"{volume / 1_000_000:.2f}M"
+    elif volume >= 1_000:
+        return f"{volume / 1_000:.1f}K"
+    return str(volume)
+
+
+def format_single_recommendation(
+    item: dict[str, Any],
+    rvol: Optional[float] = None,
+    volume: Optional[int] = None,
+) -> str:
     """Format a single recommendation as a Discord message.
 
     Args:
         item: Single recommendation dictionary.
         rvol: Optional relative volume from Finviz.
+        volume: Optional current volume from Finviz.
 
     Returns:
         Formatted Discord message for one symbol.
@@ -256,10 +294,16 @@ def format_single_recommendation(item: dict[str, Any], rvol: Optional[float] = N
         f"Sector: {sector} | Theme: {theme} | Risk: {risk}",
     ]
 
-    # Add RVOL if available
-    if rvol is not None:
-        rvol_emoji = "🔥" if rvol >= 2 else "📊"
-        lines.append(f"{rvol_emoji} RVOL: {rvol:.2f}")
+    # Add RVOL and Volume if available
+    if rvol is not None or volume is not None:
+        metrics_parts = []
+        if rvol is not None:
+            rvol_emoji = "🔥" if rvol >= 2 else "📊"
+            metrics_parts.append(f"{rvol_emoji} RVOL: {rvol:.2f}")
+        if volume is not None:
+            vol_emoji = "📈" if volume >= 1_000_000 else "📉"
+            metrics_parts.append(f"{vol_emoji} Vol: {format_volume(volume)}")
+        lines.append(" | ".join(metrics_parts))
 
     lines.extend([
         "",
@@ -397,7 +441,8 @@ class RecommendationsScheduler:
         discord_webhook_url: str,
         poll_interval: int = 300,
         min_rvol: float = 2.0,
-        check_rvol: bool = True,
+        min_volume: int = 1_000_000,
+        check_finviz: bool = True,
         track_posted: bool = True,
         state_file: Optional[Path] = None,
     ):
@@ -408,7 +453,8 @@ class RecommendationsScheduler:
             discord_webhook_url: Discord webhook URL for posting.
             poll_interval: Seconds between fetches.
             min_rvol: Minimum RVOL to post (default 2.0).
-            check_rvol: Whether to check RVOL from Finviz.
+            min_volume: Minimum volume to post (default 1,000,000).
+            check_finviz: Whether to check RVOL/volume from Finviz.
             track_posted: Whether to track posted tickers to avoid duplicates.
             state_file: Optional path for state file.
         """
@@ -416,12 +462,13 @@ class RecommendationsScheduler:
         self.discord_webhook_url = discord_webhook_url
         self.poll_interval = poll_interval
         self.min_rvol = min_rvol
-        self.check_rvol = check_rvol
+        self.min_volume = min_volume
+        self.check_finviz = check_finviz
         self.track_posted = track_posted
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._discord_client: Optional[httpx.AsyncClient] = None
-        self._finviz = FinvizChecker() if check_rvol else None
+        self._finviz = FinvizChecker() if check_finviz else None
         self._tracker = PostedTickersTracker(state_file or DEFAULT_DB_FILE) if track_posted else None
 
     async def _get_discord_client(self) -> httpx.AsyncClient:
@@ -452,14 +499,14 @@ class RecommendationsScheduler:
             logger.error(f"Failed to post to Discord: {e}")
             return False
 
-    async def _should_post(self, item: dict[str, Any]) -> tuple[bool, Optional[float]]:
+    async def _should_post(self, item: dict[str, Any]) -> tuple[bool, Optional[dict]]:
         """Check if a recommendation should be posted.
 
         Args:
             item: Recommendation item.
 
         Returns:
-            Tuple of (should_post, rvol_value).
+            Tuple of (should_post, metrics_dict with 'rvol' and 'volume').
         """
         ticker = item.get("ticker", "")
         if not ticker:
@@ -470,22 +517,36 @@ class RecommendationsScheduler:
             logger.debug(f"{ticker}: Already posted, skipping")
             return False, None
 
-        # Check RVOL from Finviz
-        rvol = None
+        # Check RVOL and Volume from Finviz
+        metrics = None
         if self._finviz:
-            rvol = await self._finviz.get_rvol(ticker)
-            if rvol is None:
-                logger.warning(f"{ticker}: Could not fetch RVOL, skipping")
+            metrics = await self._finviz.get_metrics(ticker)
+            if metrics is None:
+                logger.warning(f"{ticker}: Could not fetch metrics, skipping")
                 return False, None
-            if rvol < self.min_rvol:
-                logger.info(f"{ticker}: RVOL {rvol:.2f} < {self.min_rvol}, skipping")
-                return False, rvol
 
-        return True, rvol
+            rvol = metrics.get("rvol")
+            volume = metrics.get("volume")
+
+            # Check RVOL threshold
+            if rvol is None or rvol < self.min_rvol:
+                rvol_str = f"{rvol:.2f}" if rvol is not None else "N/A"
+                logger.info(f"{ticker}: RVOL {rvol_str} < {self.min_rvol}, skipping")
+                return False, metrics
+
+            # Check Volume threshold
+            if volume is None or volume < self.min_volume:
+                vol_str = format_volume(volume) if volume else "N/A"
+                logger.info(f"{ticker}: Volume {vol_str} < {format_volume(self.min_volume)}, skipping")
+                return False, metrics
+
+            logger.info(f"{ticker}: PASS - RVOL {rvol:.2f}, Vol {format_volume(volume)}")
+
+        return True, metrics
 
     async def _poll_loop(self) -> None:
         """Main polling loop."""
-        logger.info(f"Starting recommendations polling (interval: {self.poll_interval}s, min_rvol: {self.min_rvol})")
+        logger.info(f"Starting recommendations polling (interval: {self.poll_interval}s, min_rvol: {self.min_rvol}, min_vol: {format_volume(self.min_volume)})")
 
         while self._running:
             try:
@@ -498,12 +559,16 @@ class RecommendationsScheduler:
                     ticker = item.get("ticker", "")
 
                     # Check if should post
-                    should_post, rvol = await self._should_post(item)
+                    should_post, metrics = await self._should_post(item)
                     if not should_post:
                         continue
 
+                    # Extract metrics
+                    rvol = metrics.get("rvol") if metrics else None
+                    volume = metrics.get("volume") if metrics else None
+
                     # Format and post
-                    message = format_single_recommendation(item, rvol)
+                    message = format_single_recommendation(item, rvol, volume)
                     if await self._post_to_discord(message):
                         posted_count += 1
                         # Mark as posted with metadata
@@ -518,7 +583,7 @@ class RecommendationsScheduler:
                     # Small delay between posts to avoid rate limiting
                     await asyncio.sleep(2)
 
-                logger.info(f"Posted {posted_count}/{len(items)} recommendations (RVOL >= {self.min_rvol})")
+                logger.info(f"Posted {posted_count}/{len(items)} recommendations (RVOL >= {self.min_rvol}, Vol >= {format_volume(self.min_volume)})")
 
             except Exception as e:
                 logger.error(f"Error in recommendations poll: {e}")
@@ -589,12 +654,16 @@ class RecommendationsScheduler:
                 ticker = item.get("ticker", "")
 
                 # Check if should post
-                should_post, rvol = await self._should_post(item)
+                should_post, metrics = await self._should_post(item)
                 if not should_post:
                     continue
 
+                # Extract metrics
+                rvol = metrics.get("rvol") if metrics else None
+                volume = metrics.get("volume") if metrics else None
+
                 # Format and post
-                message = format_single_recommendation(item, rvol)
+                message = format_single_recommendation(item, rvol, volume)
                 if await self._post_to_discord(message):
                     posted_count += 1
                     # Mark as posted with metadata
@@ -609,7 +678,7 @@ class RecommendationsScheduler:
                 # Small delay between posts to avoid rate limiting
                 await asyncio.sleep(2)
 
-            logger.info(f"Posted {posted_count}/{len(items)} recommendations (RVOL >= {self.min_rvol})")
+            logger.info(f"Posted {posted_count}/{len(items)} recommendations (RVOL >= {self.min_rvol}, Vol >= {format_volume(self.min_volume)})")
             return posted_count, len(items)
         except Exception as e:
             logger.error(f"Failed to fetch and post: {e}")
